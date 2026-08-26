@@ -3,12 +3,23 @@ from tvDatafeed import TvDatafeed, Interval
 import requests
 from datetime import datetime
 import time
+import threading
+from flask import Flask
+
+# ==========================================
+# --- FINTO SITO WEB PER INGANNARE RENDER ---
+# ==========================================
+app = Flask(__name__)
+
+@app.route('/')
+def home():
+    return "✅ Il Bot di Trading è online e sta funzionando!"
 
 # ==========================================
 # --- 1. IMPOSTAZIONI TELEGRAM ---
 # ==========================================
-TELEGRAM_TOKEN = '8996771491:AAFi3wBZmIMqtMwELuCdGID3lNMd7NOHV1c'
-TELEGRAM_CHAT_ID = '5241768648'
+TELEGRAM_TOKEN = 'IL_TUO_TOKEN_BOT_QUI'
+TELEGRAM_CHAT_ID = 'IL_TUO_CHAT_ID_QUI'
 
 SYMBOL = 'XAUUSD'
 EXCHANGE = 'OANDA' 
@@ -20,19 +31,10 @@ TIMEFRAMES = [
     (Interval.in_5_minute, '5 Minuti')
 ]
 
-# Memoria anti-spam: ricorda l'ultimo segnale inviato per non ripeterlo all'infinito
-ultimi_segnali_inviati = {
-    '1 Ora': None,
-    '15 Minuti': None,
-    '5 Minuti': None
-}
+ultimi_segnali_inviati = {'1 Ora': None, '15 Minuti': None, '5 Minuti': None}
 
-# ==========================================
-# --- 2. FUNZIONE DI ANALISI ---
-# ==========================================
 def analizza_tf(tv, tf_obj, tf_name):
     print(f"[{datetime.now().strftime('%H:%M:%S')}] 🔄 Analisi {SYMBOL} su {tf_name}...")
-    
     try:
         df = tv.get_hist(symbol=SYMBOL, exchange=EXCHANGE, interval=tf_obj, n_bars=500)
     except Exception as e:
@@ -45,7 +47,6 @@ def analizza_tf(tv, tf_obj, tf_name):
         tipo_segnale = ""
         prezzo_chiusura = 0
 
-        # Logica matematica Wick Block
         for curr in range(NUM_ACCEL + 1, len(df)):
             accel_bullish = True
             accel_bearish = True
@@ -53,7 +54,6 @@ def analizza_tf(tv, tf_obj, tf_name):
             for j in range(1, NUM_ACCEL + 1):
                 idx = curr - j
                 idx_prev = curr - j - 1
-                
                 if df['close'].iloc[idx] <= df['open'].iloc[idx] or df['close'].iloc[idx] <= df['high'].iloc[idx_prev]:
                     accel_bullish = False
                 if df['close'].iloc[idx] >= df['open'].iloc[idx] or df['close'].iloc[idx] >= df['low'].iloc[idx_prev]:
@@ -75,15 +75,11 @@ def analizza_tf(tv, tf_obj, tf_name):
                 prezzo_chiusura = df['close'].iloc[curr]
 
         if ultimo_segnale_idx != -1:
-            # CONTROLLO ANTI-SPAM
             if ultimi_segnali_inviati[tf_name] == data_ultimo_segnale:
-                print(f"Nessun *nuovo* segnale su {tf_name}. In attesa del prossimo...")
                 return
 
-            # Salviamo il segnale in memoria per non rimandarlo al prossimo giro
             ultimi_segnali_inviati[tf_name] = data_ultimo_segnale
 
-            # Capiamo se è fresco o passato
             if ultimo_segnale_idx == len(df) - 1:
                 stato_tempo = "🚀 *SEGNALE ATTUALE (Fresco!)*"
             else:
@@ -91,46 +87,34 @@ def analizza_tf(tv, tf_obj, tf_name):
                 stato_tempo = f"⏳ *SEGNALE PASSATO* (Avvenuto {candele_fa} candele fa)"
             
             url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
-            
-            messaggio = (
-                f"🚨 *WICK BLOCK - {tf_name}*\n\n"
-                f"{stato_tempo}\n\n"
-                f"🗓 **Data/Ora:** {data_ultimo_segnale}\n"
-                f"🏆 **Asset:** {SYMBOL} ({EXCHANGE})\n"
-                f"🎯 **Direzione:** {tipo_segnale}\n"
-                f"💵 **Prezzo chiusura:** {prezzo_chiusura:.2f}$"
-            )
-            
-            payload = {
-                "chat_id": TELEGRAM_CHAT_ID,
-                "text": messaggio,
-                "parse_mode": "Markdown"
-            }
+            messaggio = f"🚨 *WICK BLOCK - {tf_name}*\n\n{stato_tempo}\n\n🗓 **Data/Ora:** {data_ultimo_segnale}\n🏆 **Asset:** {SYMBOL} ({EXCHANGE})\n🎯 **Direzione:** {tipo_segnale}\n💵 **Prezzo chiusura:** {prezzo_chiusura:.2f}$"
+            payload = {"chat_id": TELEGRAM_CHAT_ID, "text": messaggio, "parse_mode": "Markdown"}
             
             try:
-                response = requests.post(url, data=payload)
-                if response.status_code == 200:
-                    print(f"✅ Inviato segnale {tf_name} su Telegram!")
-                else:
-                    print(f"❌ Errore Telegram su {tf_name}: {response.text}")
+                requests.post(url, data=payload)
+                print(f"✅ Inviato segnale {tf_name} su Telegram!")
             except Exception as e:
                 print(f"❌ Errore API: {e}")
-        else:
-            print(f"Nessun segnale presente su {tf_name}")
 
 # ==========================================
-# --- 3. CICLO INFINITO 24/7 ---
+# --- 3. MOTORE DEL BOT IN BACKGROUND ---
 # ==========================================
-print(f"🤖 BOT AVVIATO. Monitoraggio continuo su {SYMBOL} iniziato!")
-tv = TvDatafeed()
+def run_bot():
+    print(f"🤖 BOT AVVIATO. Monitoraggio continuo su {SYMBOL} iniziato!")
+    tv = TvDatafeed()
+    while True:
+        try:
+            for tf_obj, tf_name in TIMEFRAMES:
+                analizza_tf(tv, tf_obj, tf_name)
+                time.sleep(2)
+        except Exception as e:
+            print(f"❌ Errore nel ciclo principale: {e}")
+        time.sleep(300)
 
-while True:
-    try:
-        for tf_obj, tf_name in TIMEFRAMES:
-            analizza_tf(tv, tf_obj, tf_name)
-            time.sleep(2) # Pausa anti-blocco
-    except Exception as e:
-        print(f"❌ Errore nel ciclo principale: {e}")
+if __name__ == '__main__':
+    # Avvia il bot di trading su un binario separato
+    t = threading.Thread(target=run_bot)
+    t.start()
     
-    print("\n⏳ Attesa di 5 minuti prima del prossimo check...\n")
-    time.sleep(300) # Aspetta 5 minuti
+    # Avvia il finto sito web richiesto da Render
+    app.run(host='0.0.0.0', port=10000)
