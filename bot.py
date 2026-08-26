@@ -19,12 +19,12 @@ def home():
 # ==========================================
 # --- 1. IMPOSTAZIONI TELEGRAM E PARAMETRI ---
 # ==========================================
-TELEGRAM_TOKEN = 'IL_TUO_TOKEN_BOT_QUI'
-TELEGRAM_CHAT_ID = 'IL_TUO_CHAT_ID_QUI'
+TELEGRAM_TOKEN = '8996771491:AAFi3wBZmIMqtMwELuCdGID3lNMd7NOHV1c'
+TELEGRAM_CHAT_ID = '5241768648'
 
 SYMBOL = 'XAUUSD'
 EXCHANGE = 'OANDA' 
-NUM_ACCEL = 4
+NUM_ACCEL = 3
 
 TIMEFRAMES = [
     (Interval.in_1_hour, '1 Ora'),
