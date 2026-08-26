@@ -2,6 +2,7 @@ import pandas as pd
 from tvDatafeed import TvDatafeed, Interval
 import requests
 from datetime import datetime, timedelta
+from zoneinfo import ZoneInfo
 import time
 import threading
 from flask import Flask
@@ -13,17 +14,17 @@ app = Flask(__name__)
 
 @app.route('/')
 def home():
-    return "✅ Il Bot Wick Block (Passato + Futuro) è online!"
+    return "✅ Il Bot Wick Block (Ora Italiana) è online!"
 
 # ==========================================
 # --- 1. IMPOSTAZIONI TELEGRAM E PARAMETRI ---
 # ==========================================
-TELEGRAM_TOKEN = '8996771491:AAFi3wBZmIMqtMwELuCdGID3lNMd7NOHV1c'
-TELEGRAM_CHAT_ID = '5241768648'
+TELEGRAM_TOKEN = 'IL_TUO_TOKEN_BOT_QUI'
+TELEGRAM_CHAT_ID = 'IL_TUO_CHAT_ID_QUI'
 
 SYMBOL = 'XAUUSD'
 EXCHANGE = 'OANDA' 
-NUM_ACCEL = 3
+NUM_ACCEL = 4
 
 TIMEFRAMES = [
     (Interval.in_1_hour, '1 Ora'),
@@ -31,41 +32,47 @@ TIMEFRAMES = [
     (Interval.in_5_minute, '5 Minuti')
 ]
 
-# Memoria cronologica: memorizza le chiavi uniche (TF + Data/Ora) dei segnali già inviati
+# Fuso orario di Roma
+TZ_ROMA = ZoneInfo("Europe/Rome")
+
+# Memoria cronologica dei segnali già inviati
 segnali_inviati_storico = set()
 
 # ==========================================
-# --- 2. FUNZIONE DI ANALISI (Passato 24h + Futuro) ---
+# --- 2. FUNZIONE DI ANALISI ---
 # ==========================================
 def analizza_tf(tv, tf_obj, tf_name):
-    print(f"[{datetime.now().strftime('%H:%M:%S')}] 🔄 Analisi {SYMBOL} su {tf_name}...")
+    print(f"[{datetime.now(TZ_ROMA).strftime('%H:%M:%S')}] 🔄 Analisi {SYMBOL} su {tf_name}...")
     try:
-        # Scarichiamo un numero sufficiente di barre per coprire almeno l'ultimo giorno e oltre
         df = tv.get_hist(symbol=SYMBOL, exchange=EXCHANGE, interval=tf_obj, n_bars=500)
     except Exception as e:
         print(f"❌ Errore di connessione su {tf_name}: {e}")
         return
 
     if df is not None and not df.empty:
-        # Calcoliamo il limite temporale di 24 ore fa
-        limite_24h = datetime.now() - timedelta(hours=24)
+        # Calcoliamo il limite di 24 ore fa basato sull'ora di Roma
+        limite_24h = datetime.now(TZ_ROMA) - timedelta(hours=24)
 
-        # Logica Pine Script convertita in Python
         for curr in range(NUM_ACCEL + 1, len(df)):
             data_candela = df.index[curr]
             
-            # FILTRO: Analizziamo solo le candele dall'ultimo giorno a oggi (e futuro)
-            # (Se il dataframe usa date naive o aware, confrontiamo in sicurezza)
+            # Gestione della conversione dell'orario della candela a Ora Italiana
             try:
-                if isinstance(data_candela, pd.Timestamp) and data_candela.tz is not None:
-                    limite_24h_tz = pd.Timestamp(limite_24h, tz=data_candela.tz)
+                if isinstance(data_candela, pd.Timestamp):
+                    if data_candela.tz is None:
+                        # Se i dati non hanno fuso, assumiamo UTC o li normalizziamo
+                        data_candela_it = data_candela.tz_localize("UTC").tz_convert(TZ_ROMA)
+                    else:
+                        data_candela_it = data_candela.tz_convert(TZ_ROMA)
                 else:
-                    limite_24h_tz = limite_24h
-                
-                if data_candela < limite_24h_tz:
-                    continue
-            except:
-                pass
+                    data_candela_it = pd.to_datetime(data_candela).tz_localize("UTC").tz_convert(TZ_ROMA)
+            except Exception:
+                # Fallback di sicurezza se la conversione fallisce
+                data_candela_it = pd.to_datetime(data_candela)
+
+            # FILTRO: Analizziamo solo le ultime 24 ore e il futuro
+            if data_candela_it < limite_24h:
+                continue
 
             accel_bullish = True
             accel_bearish = True
@@ -92,10 +99,9 @@ def analizza_tf(tv, tf_obj, tf_name):
             trigger_long = accel_bearish and (df['close'].iloc[curr] >= df['open'].iloc[curr] or df['close'].iloc[curr] >= df['low'].iloc[curr-1])
 
             if trigger_short or trigger_long:
-                data_str = data_candela.strftime("%d/%m/%Y %H:%M")
+                data_str = data_candela_it.strftime("%d/%m/%Y %H:%M")
                 chiave_univoca = f"{tf_name}_{data_str}"
 
-                # Se questo specifico segnale non è stato mai inviato, procediamo
                 if chiave_univoca not in segnali_inviati_storico:
                     segnali_inviati_storico.add(chiave_univoca)
 
@@ -106,7 +112,6 @@ def analizza_tf(tv, tf_obj, tf_name):
                     else:
                         tipo_segnale = "🟢 LONG (Supporto / Wick Block Inferiore)"
 
-                    # Capiamo se è una candela attuale (futuro/live) o del passato (ultime 24h)
                     if curr == len(df) - 1:
                         stato_tempo = "🚀 *SEGNALE ATTUALE (Fresco in tempo reale!)*"
                     else:
@@ -117,7 +122,7 @@ def analizza_tf(tv, tf_obj, tf_name):
                     messaggio = (
                         f"📊 *WICK BLOCK - {tf_name}*\n\n"
                         f"{stato_tempo}\n\n"
-                        f"🗓 **Data/Ora:** {data_str}\n"
+                        f"🗓 **Data/Ora (Italia):** {data_str}\n"
                         f"🏆 **Asset:** {SYMBOL} ({EXCHANGE})\n"
                         f"🎯 **Segnale:** {tipo_segnale}\n"
                         f"💵 **Prezzo:** {prezzo_chiusura:.2f}$"
@@ -127,7 +132,7 @@ def analizza_tf(tv, tf_obj, tf_name):
                     try:
                         requests.post(url, data=payload)
                         print(f"✅ Inviato segnale ({tf_name} - {data_str}) su Telegram!")
-                        time.sleep(1) # Pausa breve tra un invio e l'altro per non intasare Telegram
+                        time.sleep(1)
                     except Exception as e:
                         print(f"❌ Errore API Telegram: {e}")
 
@@ -135,7 +140,7 @@ def analizza_tf(tv, tf_obj, tf_name):
 # --- 3. MOTORE IN BACKGROUND ---
 # ==========================================
 def run_bot():
-    print(f"🤖 BOT WICK BLOCK (24H PASSATO + FUTURO) AVVIATO SU {SYMBOL}!")
+    print(f"🤖 BOT WICK BLOCK (ORA ITALIANA) AVVIATO SU {SYMBOL}!")
     tv = TvDatafeed()
     while True:
         try:
