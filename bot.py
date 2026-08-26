@@ -23,7 +23,7 @@ TELEGRAM_CHAT_ID = 'IL_TUO_CHAT_ID_QUI'
 
 SYMBOL = 'XAUUSD'
 EXCHANGE = 'OANDA' 
-NUM_ACCEL = 4
+NUM_ACCEL = 2
 
 TIMEFRAMES = [
     (Interval.in_1_hour, '1 Ora'),
