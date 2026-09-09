@@ -1,7 +1,7 @@
 import pandas as pd
 from tvDatafeed import TvDatafeed, Interval
 import requests
-from datetime import datetime, timedelta
+from datetime import datetime
 from zoneinfo import ZoneInfo
 import time
 import threading
@@ -14,7 +14,7 @@ app = Flask(__name__)
 
 @app.route('/')
 def home():
-    return "✅ Il Bot Wick Block (Ora Italiana) è online!"
+    return "✅ Il Bot Wick Block (Solo Segnali Live - Controllo 1 Minuto) è online!"
 
 # ==========================================
 # --- 1. IMPOSTAZIONI TELEGRAM E PARAMETRI ---
@@ -35,123 +35,119 @@ TIMEFRAMES = [
 # Fuso orario di Roma
 TZ_ROMA = ZoneInfo("Europe/Rome")
 
-# Memoria cronologica dei segnali già inviati
-segnali_inviati_storico = set()
+# Memoria dell'ultimo timestamp processato per ciascun timeframe (evita duplicati e scarta il passato)
+ultimi_timestamp_processati = {'1 Ora': None, '15 Minuti': None, '5 Minuti': None}
 
 # ==========================================
-# --- 2. FUNZIONE DI ANALISI ---
+# --- 2. FUNZIONE DI ANALISI SOLO LIVE ---
 # ==========================================
 def analizza_tf(tv, tf_obj, tf_name):
-    print(f"[{datetime.now(TZ_ROMA).strftime('%H:%M:%S')}] 🔄 Analisi {SYMBOL} su {tf_name}...")
     try:
-        df = tv.get_hist(symbol=SYMBOL, exchange=EXCHANGE, interval=tf_obj, n_bars=500)
+        # Scarichiamo solo le ultime barre necessarie per il calcolo dell'accelerazione
+        df = tv.get_hist(symbol=SYMBOL, exchange=EXCHANGE, interval=tf_obj, n_bars=50)
     except Exception as e:
-        print(f"❌ Errore di connessione su {tf_name}: {e}")
+        print(f"[{datetime.now(TZ_ROMA).strftime('%H:%M:%S')}] ❌ Errore connessione {tf_name}: {e}")
         return
 
-    if df is not None and not df.empty:
-        # Calcoliamo il limite di 24 ore fa basato sull'ora di Roma
-        limite_24h = datetime.now(TZ_ROMA) - timedelta(hours=24)
+    if df is not None and not df.empty and len(df) > NUM_ACCEL + 2:
+        # La candela chiusa più recente è l'ultima o la penultima a seconda del feed real-time.
+        # Analizziamo la candela appena completata (indice -2 o -1 se la barra corrente è già consolidata)
+        curr = len(df) - 1
+        data_candela = df.index[curr]
 
-        for curr in range(NUM_ACCEL + 1, len(df)):
-            data_candela = df.index[curr]
-            
-            # Gestione della conversione dell'orario della candela a Ora Italiana
-            try:
-                if isinstance(data_candela, pd.Timestamp):
-                    if data_candela.tz is None:
-                        # Se i dati non hanno fuso, assumiamo UTC o li normalizziamo
-                        data_candela_it = data_candela.tz_localize("UTC").tz_convert(TZ_ROMA)
-                    else:
-                        data_candela_it = data_candela.tz_convert(TZ_ROMA)
+        # Conversione fuso orario a Europe/Rome
+        try:
+            if isinstance(data_candela, pd.Timestamp):
+                if data_candela.tz is None:
+                    data_candela_it = data_candela.tz_localize("UTC").tz_convert(TZ_ROMA)
                 else:
-                    data_candela_it = pd.to_datetime(data_candela).tz_localize("UTC").tz_convert(TZ_ROMA)
-            except Exception:
-                # Fallback di sicurezza se la conversione fallisce
-                data_candela_it = pd.to_datetime(data_candela)
+                    data_candela_it = data_candela.tz_convert(TZ_ROMA)
+            else:
+                data_candela_it = pd.to_datetime(data_candela).tz_localize("UTC").tz_convert(TZ_ROMA)
+        except Exception:
+            data_candela_it = pd.to_datetime(data_candela)
 
-            # FILTRO: Analizziamo solo le ultime 24 ore e il futuro
-            if data_candela_it < limite_24h:
-                continue
+        data_str = data_candela_it.strftime("%d/%m/%Y %H:%M")
 
-            accel_bullish = True
-            accel_bearish = True
+        # Se è il primo avvio del bot per questo timeframe, salviamo l'orario e NON mandiamo vecchi segnali
+        if ultimi_timestamp_processati[tf_name] is None:
+            ultimi_timestamp_processati[tf_name] = data_str
+            print(f"[{datetime.now(TZ_ROMA).strftime('%H:%M:%S')}] 📌 Inizializzato {tf_name} su candela: {data_str} (nessun segnale passato inviato)")
+            return
 
-            for i in range(1, NUM_ACCEL + 1):
-                idx = curr - i
-                idx_prev = curr - i - 1
-                
-                is_green_current = df['close'].iloc[idx] > df['open'].iloc[idx]
-                is_green_prev = df['close'].iloc[idx_prev] > df['open'].iloc[idx_prev]
-                breaks_high = df['close'].iloc[idx] > df['high'].iloc[idx_prev]
-                
-                if not (is_green_current and is_green_prev and breaks_high):
-                    accel_bullish = False
+        # Se questa candela è già stata analizzata, aspettiamo la prossima
+        if ultimi_timestamp_processati[tf_name] == data_str:
+            return
 
-                is_red_current = df['close'].iloc[idx] < df['open'].iloc[idx]
-                is_red_prev = df['close'].iloc[idx_prev] < df['open'].iloc[idx_prev]
-                breaks_low = df['close'].iloc[idx] < df['low'].iloc[idx_prev]
-                
-                if not (is_red_current and is_red_prev and breaks_low):
-                    accel_bearish = False
+        # Calcolo Accelerazione Pura (Pine Script) sulle barre precedenti
+        accel_bullish = True
+        accel_bearish = True
 
-            trigger_short = accel_bullish and (df['close'].iloc[curr] <= df['open'].iloc[curr] or df['close'].iloc[curr] <= df['high'].iloc[curr-1])
-            trigger_long = accel_bearish and (df['close'].iloc[curr] >= df['open'].iloc[curr] or df['close'].iloc[curr] >= df['low'].iloc[curr-1])
+        for i in range(1, NUM_ACCEL + 1):
+            idx = curr - i
+            idx_prev = curr - i - 1
+            
+            is_green_current = df['close'].iloc[idx] > df['open'].iloc[idx]
+            is_green_prev = df['close'].iloc[idx_prev] > df['open'].iloc[idx_prev]
+            breaks_high = df['close'].iloc[idx] > df['high'].iloc[idx_prev]
+            
+            if not (is_green_current and is_green_prev and breaks_high):
+                accel_bullish = False
 
-            if trigger_short or trigger_long:
-                data_str = data_candela_it.strftime("%d/%m/%Y %H:%M")
-                chiave_univoca = f"{tf_name}_{data_str}"
+            is_red_current = df['close'].iloc[idx] < df['open'].iloc[idx]
+            is_red_prev = df['close'].iloc[idx_prev] < df['open'].iloc[idx_prev]
+            breaks_low = df['close'].iloc[idx] < df['low'].iloc[idx_prev]
+            
+            if not (is_red_current and is_red_prev and breaks_low):
+                accel_bearish = False
 
-                if chiave_univoca not in segnali_inviati_storico:
-                    segnali_inviati_storico.add(chiave_univoca)
+        # Trigger su candela corrente
+        trigger_short = accel_bullish and (df['close'].iloc[curr] <= df['open'].iloc[curr] or df['close'].iloc[curr] <= df['high'].iloc[curr-1])
+        trigger_long = accel_bearish and (df['close'].iloc[curr] >= df['open'].iloc[curr] or df['close'].iloc[curr] >= df['low'].iloc[curr-1])
 
-                    prezzo_chiusura = df['close'].iloc[curr]
-                    
-                    if trigger_short:
-                        tipo_segnale = "🔴 SHORT (Resistenza / Wick Block Superiore)"
-                    else:
-                        tipo_segnale = "🟢 LONG (Supporto / Wick Block Inferiore)"
+        # Aggiorniamo sempre il timestamp visto per non rieseguire sulla stessa candela
+        ultimi_timestamp_processati[tf_name] = data_str
 
-                    if curr == len(df) - 1:
-                        stato_tempo = "🚀 *SEGNALE ATTUALE (Fresco in tempo reale!)*"
-                    else:
-                        candele_fa = (len(df) - 1) - curr
-                        stato_tempo = f"⏳ *SEGNALE PASSATO DELLE ULTIME 24H* ({candele_fa} candele fa)"
+        if trigger_short or trigger_long:
+            prezzo_chiusura = df['close'].iloc[curr]
+            
+            if trigger_short:
+                tipo_segnale = "🔴 SHORT (Resistenza / Wick Block Superiore)"
+            else:
+                tipo_segnale = "🟢 LONG (Supporto / Wick Block Inferiore)"
 
-                    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
-                    messaggio = (
-                        f"📊 *WICK BLOCK - {tf_name}*\n\n"
-                        f"{stato_tempo}\n\n"
-                        f"🗓 **Data/Ora (Italia):** {data_str}\n"
-                        f"🏆 **Asset:** {SYMBOL} ({EXCHANGE})\n"
-                        f"🎯 **Segnale:** {tipo_segnale}\n"
-                        f"💵 **Prezzo:** {prezzo_chiusura:.2f}$"
-                    )
-                    payload = {"chat_id": TELEGRAM_CHAT_ID, "text": messaggio, "parse_mode": "Markdown"}
-                    
-                    try:
-                        requests.post(url, data=payload)
-                        print(f"✅ Inviato segnale ({tf_name} - {data_str}) su Telegram!")
-                        time.sleep(1)
-                    except Exception as e:
-                        print(f"❌ Errore API Telegram: {e}")
+            url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
+            messaggio = (
+                f"⚡ *NUOVO SEGNALE LIVE - {tf_name}*\n\n"
+                f"🗓 **Data/Ora:** {data_str}\n"
+                f"🏆 **Asset:** {SYMBOL} ({EXCHANGE})\n"
+                f"🎯 **Segnale:** {tipo_segnale}\n"
+                f"💵 **Prezzo:** {prezzo_chiusura:.2f}$"
+            )
+            payload = {"chat_id": TELEGRAM_CHAT_ID, "text": messaggio, "parse_mode": "Markdown"}
+            
+            try:
+                requests.post(url, data=payload, timeout=10)
+                print(f"[{datetime.now(TZ_ROMA).strftime('%H:%M:%S')}] 🚀 Inviato segnale FRESCO ({tf_name}) su Telegram!")
+            except Exception as e:
+                print(f"❌ Errore invio Telegram: {e}")
 
 # ==========================================
 # --- 3. MOTORE IN BACKGROUND ---
 # ==========================================
 def run_bot():
-    print(f"🤖 BOT WICK BLOCK (ORA ITALIANA) AVVIATO SU {SYMBOL}!")
+    print(f"🤖 BOT AVVIATO: Monitoraggio {SYMBOL} ({EXCHANGE}) ogni 60 secondi!")
     tv = TvDatafeed()
     while True:
         try:
             for tf_obj, tf_name in TIMEFRAMES:
                 analizza_tf(tv, tf_obj, tf_name)
-                time.sleep(2)
+                time.sleep(1)  # Breve pausa di rispetto tra le richieste API
         except Exception as e:
-            print(f"❌ Errore nel ciclo principale: {e}")
+            print(f"❌ Errore nel ciclo di scansione: {e}")
         
-        print("\n⏳ Attesa di 5 minuti prima del prossimo controllo live...\n")
-        time.sleep(300)
+        # Scansione ogni 60 secondi
+        time.sleep(60)
 
 if __name__ == '__main__':
     t = threading.Thread(target=run_bot)
